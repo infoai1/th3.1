@@ -11,9 +11,13 @@ ALIGN_MAP = {
 
 def _pt(size):
     try:
-        return size.pt if size else None
+        return float(size.pt) if size else None
     except Exception:
         return None
+
+def _is_num(x): return isinstance(x, (int, float))
+def _f(x, d=None): return float(x) if _is_num(x) else d
+def _r(x): return round(float(x), 2) if _is_num(x) else None
 
 def _any_bold(p): return any(r.bold for r in p.runs if r.text)
 def _bold_fraction(p):
@@ -29,27 +33,26 @@ def _italic_fraction(p):
 
 def _avg_font(p):
     sizes = [_pt(r.font.size) for r in p.runs if r.font and r.font.size]
+    sizes = [s for s in sizes if _is_num(s)]
     return sum(sizes) / len(sizes) if sizes else None
 
 def _max_font(p):
     sizes = [_pt(r.font.size) for r in p.runs if r.font and r.font.size]
+    sizes = [s for s in sizes if _is_num(s)]
     return max(sizes) if sizes else None
 
 def _align(p): return ALIGN_MAP.get(p.alignment, "left")
 def _style(p):
-    try:
-        return (p.style.name or "").lower()
-    except Exception:
-        return ""
+    try: return (p.style.name or "").lower()
+    except Exception: return ""
 
 def _looks_sentence_like(text):
     t = (text or "").strip()
-    if not t:
-        return True
-    end_punct = t.endswith(".") or t.endswith("!") or t.endswith("?") or t.endswith('"') or t.endswith("'")
-    has_sentence_punct = (t.count(".") + t.count("!") + t.count("?")) >= 1
+    if not t: return True
+    end = t.endswith((".", "!", "?", '"', "'"))
+    has_punct = sum(t.count(x) for x in ".!?") >= 1
     longish = len(t.split()) >= 10
-    return end_punct or has_sentence_punct or longish
+    return end or has_punct or longish
 
 def _is_quoted_oneliner(text):
     t = (text or "").strip()
@@ -57,25 +60,14 @@ def _is_quoted_oneliner(text):
         (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'"))
     )
 
-def _quote_flag(text, features, quote_rules):
-    wc = features["word_count"]
-    align = features["align"]
-    any_bold = features["any_bold"]
-    bold_frac = features["bold_fraction"]
-    any_italic = features["any_italic"]
-    italic_frac = features["italic_fraction"]
-    quoted_oneliner = features["quoted_oneliner"]
-
-    if quote_rules.get("quoted_one_liners", True) and quoted_oneliner:
+def _quote_flag(text, f, qr):
+    wc, align = f["word_count"], f["align"]
+    if qr.get("quoted_one_liners", True) and f["quoted_oneliner"]:
         return True
-
-    if wc <= quote_rules.get("short_word_cutoff", 60):
-        if quote_rules.get("centered_short", True) and align == "center":
-            return True
-        if quote_rules.get("bold_short", True) and (any_bold or bold_frac >= 0.6):
-            return True
-        if quote_rules.get("italic_short", True) and (any_italic or italic_frac >= 0.6):
-            return True
+    if wc <= qr.get("short_word_cutoff", 60):
+        if qr.get("centered_short", True) and align == "center": return True
+        if qr.get("bold_short", True) and (f["any_bold"] or f["bold_fraction"] >= 0.6): return True
+        if qr.get("italic_short", True) and (f["any_italic"] or f["italic_fraction"] >= 0.6): return True
     return False
 
 def classify_levels_and_features(paragraph, text, rules, quote_rules):
@@ -94,25 +86,20 @@ def classify_levels_and_features(paragraph, text, rules, quote_rules):
     sentence_like = _looks_sentence_like(text) if rules.get("suppress_sentences", True) else False
     quoted_oneliner = _is_quoted_oneliner(text) if rules.get("suppress_quotes", True) else False
 
-    # Heading styles
     style_h1 = "heading 1" in style or style.strip() == "heading1"
     style_h2 = "heading 2" in style or style.strip() == "heading2"
     style_h3 = "heading 3" in style or style.strip() == "heading3"
 
     def level_match(key):
         lvl = rules["levels"][key]
-        if not lvl.get("enabled", True):
-            return False, 0
-        size_ok = (avg_size and avg_size >= lvl["min_size"]) or (max_size and max_size >= lvl["min_size"])
-        if not size_ok:
-            return False, 0
-        align_ok = align in lvl.get("allowed_align", ["left", "center", "right"])
-        if not align_ok:
-            return False, 0
-        if lvl.get("require_bold", False) and not any_bold and bold_frac < 0.4:
-            return False, 0
-        if lvl.get("require_short_phrase", True) and not short_phrase:
-            return False, 0
+        min_size = _f(lvl.get("min_size"), 13)
+        avg_ok = _is_num(avg_size) and _is_num(min_size) and avg_size >= min_size
+        max_ok = _is_num(max_size) and _is_num(min_size) and max_size >= min_size
+        size_ok = avg_ok or max_ok
+        if not lvl.get("enabled", True) or not size_ok: return False, 0
+        if align not in lvl.get("allowed_align", ["left", "center", "right"]): return False, 0
+        if lvl.get("require_bold", False) and not any_bold and bold_frac < 0.4: return False, 0
+        if lvl.get("require_short_phrase", True) and not short_phrase: return False, 0
 
         score = 0
         if any_bold or bold_frac >= 0.6: score += 1
@@ -124,11 +111,7 @@ def classify_levels_and_features(paragraph, text, rules, quote_rules):
         if quoted_oneliner: score -= 2
         return True, score
 
-    is_h1 = style_h1
-    is_h2 = style_h2
-    is_h3 = style_h3
-    score = 0
-
+    is_h1, is_h2, is_h3, score = style_h1, style_h2, style_h3, 0
     if not any([is_h1, is_h2, is_h3]):
         for k in ["h1", "h2", "h3"]:
             ok, sc = level_match(k)
@@ -141,11 +124,11 @@ def classify_levels_and_features(paragraph, text, rules, quote_rules):
     features = {
         "all_caps": all_caps,
         "short_phrase": short_phrase,
-        "avg_font_size": round(avg_size, 2) if avg_size else None,
-        "max_font_size": round(max_size, 2) if max_size else None,
-        "bold_fraction": round(bold_frac, 2),
+        "avg_font_size": _r(avg_size),
+        "max_font_size": _r(max_size),
+        "bold_fraction": _r(bold_frac),
         "any_bold": any_bold,
-        "italic_fraction": round(italic_frac, 2),
+        "italic_fraction": _r(italic_frac),
         "any_italic": any_italic,
         "align": align,
         "style": style,
@@ -156,19 +139,16 @@ def classify_levels_and_features(paragraph, text, rules, quote_rules):
 
     is_quote = _quote_flag(text, features, quote_rules)
     is_header = any([is_h1, is_h2, is_h3])
-    return {
-        "is_h1": is_h1, "is_h2": is_h2, "is_h3": is_h3,
-        "is_header": is_header, "is_quote": is_quote,
-        "score": score, "features": features
-    }
+    return {"is_h1": is_h1, "is_h2": is_h2, "is_h3": is_h3,
+            "is_header": is_header, "is_quote": is_quote,
+            "score": score, "features": features}
 
 def parse_docx(docx_file, rules, quote_rules):
     doc = Document(docx_file)
     rows = []
     for idx, p in enumerate(doc.paragraphs):
         text = (p.text or "").strip()
-        if not text:
-            continue
+        if not text: continue
         c = classify_levels_and_features(p, text, rules, quote_rules)
         f = c["features"]
         rows.append({
